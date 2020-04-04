@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 import serial
 import time
+import datetime
 import numpy as np
 from vprint import vprint
 
+
+PMColumns = ['time', 'pm1', 'pm2.5', 'pm10', 'status']
 
 class Commands(object):
     wakeup  = b'BM\xe4\x00\x01\x01t'
@@ -44,10 +47,10 @@ def parse_packet(packet: bytes, standard=0):
             pm25 = int(data_hex[20] + data_hex[21] + data_hex[22] + data_hex[23], 16)
             pm10 = int(data_hex[24] + data_hex[25] + data_hex[26] + data_hex[27], 16)
 
-        return [pm1, pm25, pm10]
+        return [pm1, pm25, pm10, '']
     except IndexError:
-        print('stupid thing broke. actual length: {}'.format(len(data_hex)))
-        return None
+        print('stupid thing broke. actual length: {} \n{}'.format(len(data_hex), fmt_packet(packet)))
+        return [np.nan, np.nan, np.nan, 'failed to parse']
 
 class PMSensor(object):
 
@@ -72,9 +75,11 @@ class PMSensor(object):
 
     def __enter__(self):
         self.open_port()
+        self.cmd_wakeup()
         return self
 
     def __exit__(self, type, value, traceback):
+        self.cmd_standby()
         self.close()
 
     def open_port(self):
@@ -96,14 +101,14 @@ class PMSensor(object):
         while True:
             # get two starting bytes
             c = self.serial.read(1)
-            print(c.hex(), end=' ', flush=True)
+            # print(c.hex(), end=' ', flush=True)
             if c == b'\x42':
                 c2 = self.serial.read(1)
-                print(c2.hex(), end=' ', flush=True)
+                # print(c2.hex(), end=' ', flush=True)
                 if c2 != b'\x4d':
                     print('Not the start of the packet')
                     return True
-                print('',flush=True)
+                # print('',flush=True)
                 return False
 
     def read_serial(self):
@@ -112,7 +117,7 @@ class PMSensor(object):
         # read from uart, up to 22 bytes
         data_uart = self.serial.readline(22)
 
-        print(fmt_packet(data_uart))
+        # print(fmt_packet(data_uart))
         # encode
         values = parse_packet(data_uart)
         if values is None:
@@ -143,21 +148,43 @@ class PMSensor(object):
         # data read-out
         return data
 
-    def read_pm(self):
-
-        vprint('read_pm()')
-
-        self.cmd_wakeup()
-
+    def check_read(self):
         # try to prompt a result
         self.cmd_active()
         single_data = self.single_read()
         if single_data is None:
             raise RuntimeError('Unable to get values from device')
 
+        vprint(':) passed checkpoint :) ')
 
-        # self.cmd_active()
-        self.cmd_passive()
+    def read_pm_once(self):
+
+        try:
+            single_data = [datetime.datetime.now().isoformat()]
+            single_data += self.single_read()
+            # print(single_data)
+            time.sleep(2)
+            if single_data:
+                dd = dict(zip(PMColumns, single_data))
+                if not dd['status']:
+                    dd.pop('status')
+                return dd
+            else:
+                vprint('data values were empty')
+        except RuntimeError:
+            print('break')
+
+        return dict(zip(PMColumns, [datetime.datetime.now().isoformat(), np.nan, np.nan, np.nan, 'fail']))
+
+
+    def read_pm(self):
+
+        vprint('read_pm()')
+
+        self.check_read()
+
+        self.cmd_active()
+        # self.cmd_passive()
 
         # measure pm n-times
         all_data = []
@@ -183,17 +210,18 @@ class PMSensor(object):
         # self.write_serial(Commands.passive)
         # data = self.single_read()
         # standby mode, aka. sleep
-        self.write_serial(Commands.standby)
 
 
         # return averaged data
         return data
 
     def cmd_wakeup(self):
+        """Tell device to wake up, enable fan"""
         vprint('wakeup')
         self.write_serial(Commands.wakeup, 1)
 
     def cmd_standby(self):
+        """Put device into standby, disable fan"""
         vprint('standby')
         self.write_serial(Commands.standby)
 
