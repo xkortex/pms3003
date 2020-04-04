@@ -2,6 +2,22 @@ import os
 import errno
 import datetime
 
+
+
+class LitePstruct(dict):
+    def __getattr__(self, name):
+        if name in self.__slots__:
+            return self[name]
+        return self.__getattribute__(name)
+
+
+class TxnObj(LitePstruct):
+    __slots__ = ['trigger', 'source', 'dest']
+
+    def __init__(self, trigger, source, dest):
+        super(TxnObj, self).__init__(trigger=trigger, source=source, dest=dest)
+
+
 def pathsafe_timestamp(now=None, show_micros=False, show_millis=False):
     # type: (Optional[datetime.datetime], Optional[bool]) -> str
     """

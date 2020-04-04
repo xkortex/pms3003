@@ -23,11 +23,12 @@ with PMSensor() as pm:
     while True:
         try:
             with open(fname, 'a') as fp:
-                data = pm.read_pm_once()
+                data = pm.sm_read_active_once()
                 ds = json.dumps(data)
                 fp.write(',\n' + ds)
                 print('{}| {: >7} {: >7} {: >7} {}'.format(data['time'], data['pm1'], data['pm2.5'], data['pm10'], data.get('status', '')))
         except KeyboardInterrupt:
+            print('current state: {}'.format(pm.m.state))
             break
 
     with open(fname, 'a') as fp:
