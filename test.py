@@ -7,6 +7,9 @@ import RPi.GPIO as GPIO
 import dht11
 import util
 
+import shutil
+columns, rows = shutil.get_terminal_size(fallback=(80, 24))
+
 # run to get particle measures in the console
 
 # call a PMSensor class
@@ -20,13 +23,28 @@ with PMSensor() as pm:
         fp.write('[')
         json.dump(sys.argv[1:], fp)
         fp.write('\n')
-    while True:
+    # while True:
+    #     try:
+    #         with open(fname, 'a') as fp:
+    #             data = pm.sm_read_active_once()
+    #             ds = json.dumps(data)
+    #             fp.write(',\n' + ds)
+    #             fstring = '{}| {: >7} {: >7} {: >7} {}'.format(data['time'], data['pm1'], data['pm2.5'], data['pm10'], data.get('status', ''))
+    #             print(' '* (columns-1), end='\r')
+    #             print(fstring, end='\r')
+    #     except KeyboardInterrupt:
+    #         print('current state: {}'.format(pm.m.state))
+    #         break
+    for data in pm.gen_read():
+        if any(x is None for x in data.values()):
+            import ipdb; ipdb.set_trace()
         try:
             with open(fname, 'a') as fp:
-                data = pm.sm_read_active_once()
                 ds = json.dumps(data)
                 fp.write(',\n' + ds)
-                print('{}| {: >7} {: >7} {: >7} {}'.format(data['time'], data['pm1'], data['pm2.5'], data['pm10'], data.get('status', '')))
+                fstring = '{}| {: >7} {: >7} {: >7} {}'.format(data['time'], data['pm1'], data['pm2_5'], data['pm10'], data.get('status', ''))
+                print(' '* (columns-1), end='\r')
+                print(fstring, end='\r')
         except KeyboardInterrupt:
             print('current state: {}'.format(pm.m.state))
             break

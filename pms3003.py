@@ -22,8 +22,10 @@ import struct
 import numpy as np
 from transitions import Machine, Transition, State
 from vprint import vprint
-from util import TxnObj
+from util import TxnObj, LitePstruct
 
+
+FLUSH=False
 
 pms3003_states = ['closed',     # serial port is closed
                   'opened',     # serial port is open but we don't know if enabled yet
@@ -60,47 +62,7 @@ pms3003_transitions = [
     TxnObj('desync', states_passive, 'p_desynced'),
 ]
 
-# todo: there's gotta be an automatic way to do this
-class PMModel(object):
-    pass
-    # def __init__(self):
-    #     pass
-    #     self.state = ''
-    #
-    # def to_opened(self):
-    #     pass
-    #
-    # def to_closed(self):
-    #     pass
-    #
-    # def open(self):
-    #     pass
-    #
-    # def close(self):
-    #     pass
-    #
-    # def sync(self):
-    #     pass
-    #
-    # def desync(self):
-    #     pass
-    #
-    # def wait(self):
-    #     pass
-    #
-    # def wakeup(self):
-    #     pass
-    #
-    # def sleep(self):
-    #     pass
-    #
-    # def activate(self):
-    #     pass
-    #
-    # def passivate(self):
-    #     pass
-
-PMColumns = ['time', 'pm1', 'pm2.5', 'pm10', 'status']
+PMColumns = ['time', 'pm1', 'pm2_5', 'pm10', 'status']
 
 class Commands(object):
     wakeup  = b'BM\xe4\x00\x01\x01t'
@@ -124,14 +86,37 @@ def calc_checksum(bytes: bytes):
 
 
 def fmt_packet(bytes: bytes, delim: str = ' ', cs_len=2):
-    return '{: >3} >{} | {:02x}'.format(len(bytes), prettyhex(bytes), calc_checksum(bytes[-cs_len:]))
+    return '{: >3} >{} | {:04x}'.format(len(bytes), prettyhex(bytes), calc_checksum(bytes[:-cs_len]))
 
 
-def parse_packet(packet: bytes, standard=0, cs_len=2) -> list:
+class PMModel(object):
+    pass
+
+
+class PMResult(LitePstruct):
+    __slots__ = ['pm1', 'pm2_5', 'pm10', 'time', 'status']
+
+    def __init__(self, pm1=np.nan, pm2_5=np.nan, pm10=np.nan, time=None, status=None):
+        if time is None:
+            time = datetime.datetime.now().isoformat()
+        if status is None:
+            status = ''
+        super(PMResult, self).__init__(pm1=pm1, pm2_5=pm2_5, pm10=pm10, time=time, status=status)
+
+    @classmethod
+    def parse_tuple(cls, *args, status=None):
+        if len(args) < 3:
+            raise ValueError('Could not parse PM tuple, not enough arguments: {}'.format(args))
+        return PMResult(args[0], args[1], args[2], status=status)
+
+
+def parse_packet(packet: bytes, cs_len=2) -> PMResult:
     vprint(fmt_packet(packet))
     start, framelen = struct.unpack('>HH', packet[:4])
     if start != 0x424d:
         print('sentinel byte mismatch: {}'.format(fmt_packet(packet)))
+        return PMResult(status='failed parse')
+
     vprint('payload length: {}'.format(framelen))
 
     if framelen != 20:
@@ -140,30 +125,11 @@ def parse_packet(packet: bytes, standard=0, cs_len=2) -> list:
     try:
         payload_raw = packet[4:-cs_len]
         payload = struct.unpack('>{}H'.format(len(payload_raw)//2), payload_raw)
-        print(payload)
+        return PMResult.parse_tuple(*payload)
     except Exception as e:
         print(type(e).__name__, e)
-    # data_raw = struct.unpack
-    data_hex = packet[2:].hex()
+        return PMResult(status='failed parse')
 
-    # calculate pm values
-    try:
-        # indoor
-        if standard == 0:
-            pm1 = int(data_hex[4] + data_hex[5] + data_hex[6] + data_hex[7], 16)
-            pm25 = int(data_hex[8] + data_hex[9] + data_hex[10] + data_hex[11], 16)
-            pm10 = int(data_hex[12] + data_hex[13] + data_hex[14] + data_hex[15], 16)
-        # outdoor
-        # todo: broken?
-        elif standard == 1:
-            pm1 = int(data_hex[16] + data_hex[17] + data_hex[18] + data_hex[19], 16)
-            pm25 = int(data_hex[20] + data_hex[21] + data_hex[22] + data_hex[23], 16)
-            pm10 = int(data_hex[24] + data_hex[25] + data_hex[26] + data_hex[27], 16)
-
-        return [pm1, pm25, pm10, '']
-    except IndexError:
-        print('stupid thing broke. actual length: {} \n{}'.format(len(data_hex), fmt_packet(packet)))
-        return [np.nan, np.nan, np.nan, 'failed to parse']
 
 class PMSensor(object):
 
@@ -185,6 +151,8 @@ class PMSensor(object):
         self.timeout = timeout
 
         self.serial = None  # type: serial.Serial
+        self.last_bytes = b''
+        self.buffer = b''
 
         self.m = PMModel()
         self.machine = Machine(self.m, states=pms3003_states, transitions=pms3003_transitions, initial='closed')
@@ -213,44 +181,72 @@ class PMSensor(object):
         self.m.close()
 
     def flush(self):
+        vprint('flushing')
         self.serial.flush()
 
+    def read(self, size=1):
+        """Read serial into the local buffer """
+        self.buffer += self.serial.read(size=size)
+
+    def dump(self, end='\n', flush=FLUSH):
+        """Dump the contents of the buffer to screen for diagnostic"""
+        print(prettyhex(self.buffer), end=end, flush=flush)
+        self.clear_buffer()
+
+    def clear_buffer(self):
+        self.buffer = b''
+
     def seek_to_header_start(self):
+        """deprecated"""
         vprint('seeking to start')
         while True:
             # get two starting bytes
             c = self.serial.read(1)
-            # print(c.hex(), end=' ', flush=True)
+            # print(c.hex(), end=' ', flush=FLUSH)
             if c == b'\x42':
                 c2 = self.serial.read(1)
-                # print(c2.hex(), end=' ', flush=True)
+                # print(c2.hex(), end=' ', flush=FLUSH)
                 if c2 != b'\x4d':
                     print('Not the start of the packet')
                     return True
-                # print('',flush=True)
+                # print('',flush=FLUSH)
                 return False
 
     def sync(self):
         vprint('seeking to start')
         self.m.desync()
+        self.dump()
         while True:
             # get two starting bytes
-            packet = self.serial.read(1)
-            if packet != b'\x42':
-                print(packet.hex(), end=' ', flush=True)
+            self.read()
+            if self.buffer != b'\x42':
+                self.dump(end=' ')
                 continue
-            packet += self.serial.read(1)
-            # print(c2.hex(), end=' ', flush=True)
-            if packet != b'\x42\x4d':
-                print('Not the start of the packet')
-                return False
-            # print('',flush=True)
+            self.read()
+            # print(c2.hex(), end=' ', flush=FLUSH)
+            if self.buffer != b'\x42\x4d':
+                self.dump()
+                print('Not the start of the packet, restarting')  # this is rare
+                continue
+            print('',flush=FLUSH)
 
             # we should be at the start of the packet. Read and throw away so we can sync up
             self.m.wait()
-            packet += self.serial.read(22)
+            self.read(2)
+            start, framelen = struct.unpack('>HH', self.buffer[:4])
+            if framelen > 20:
+                print('Framelen is abnormally high: {}'.format(framelen))
+            if framelen > 64:
+                print('wacky framelen, resyncing')
+                self.dump()
+                self.m.desync()
+                continue
+            self.read(framelen)
+            self.last_bytes = self.buffer
+            self.clear_buffer()
+            print(fmt_packet(self.last_bytes))
             self.m.sync()
-            return True
+            return self.last_bytes
 
     def read_serial(self):
         vprint('Reading serial')
@@ -268,18 +264,20 @@ class PMSensor(object):
         # return data
         return values
 
-    def read_packet(self, cs_len=2):
+    def read_packet(self, cs_len=2) -> PMResult:
         vprint('Reading serial')
         if self.m.state not in states_synced:
             raise ValueError('frame is not synced: {}'.format(self.m.state))
 
+        # self.read(4)
         header = self.serial.read(4)
-
+        # header = self.buffer
         start, framelen = struct.unpack('>HH', header[:4])
         if start != 0x424d:
-            print('sentinel byte mismatch: {}'.format(fmt_packet(header)))
+            print(prettyhex(self.last_bytes + header))
+            print('sentinel byte mismatch')
             self.m.desync()
-            return None
+            return PMResult(status='sentinel byte mismatch')
 
         vprint('payload length: {}'.format(framelen))
 
@@ -298,26 +296,27 @@ class PMSensor(object):
             payload = list(struct.unpack('>{}H'.format(len(payload_raw) // 2), payload_raw))
             vprint(payload)
         except Exception as e:
-            print(type(e).__name__, e)
+            errfmt = '{}: {}'.format(e.__class__.__name__, e)
+            print(errfmt)
+            return PMResult(status=errfmt)
 
         packet = header + payload_plus_cs
         vprint(fmt_packet(packet))
-        # values = parse_packet(packet)
-        values = payload[:3]
-        if not values:
+
+        self.last_bytes = header + payload_plus_cs
+        if len(payload) < 3:
             self.flush()
             self.m.desync()
-            return None
+            print('payload too short: {}'.format(payload))
+            return PMResult(status='payload too short')
 
         if cs != actual_cs:
             print('checksum mismatch: wanted {:02x} got {:02x}'.format(cs, actual_cs))
+            self.m.desync()
+        else:
+            self.m.sync()
 
-        self.m.sync()
-
-        # return data
-        return values
-
-
+        return PMResult.parse_tuple(*payload, status=self.m.state)
 
     def write_serial(self, cmd, timeout=0.0):
         vprint('Writing serial')
@@ -349,7 +348,20 @@ class PMSensor(object):
 
         vprint(':) passed checkpoint :) ')
 
-    def sm_read_active_once(self):
+    def gen_read(self):
+        if self.m.state not in states_opened:
+            raise ValueError('device is not opened: {}'.format(self.m.state))
+
+        while True:
+            while self.m.state not in states_synced:
+                print('Current state: {}'.format(self.m.state))
+                packet = self.sync()
+                yield parse_packet(packet)
+
+            yield self.read_packet()
+
+
+    def sm_read_active_once(self) -> dict:
         if self.m.state not in states_opened:
             raise ValueError('device is not opened: {}'.format(self.m.state))
 
@@ -358,15 +370,14 @@ class PMSensor(object):
             self.sync()
 
         try:
-            single_data = [datetime.datetime.now().isoformat()]
-            data_tup = self.read_packet()
-            if data_tup:
-                dd = dict(zip(PMColumns, single_data + data_tup))
-                if not dd.get('status', None):
-                    dd.pop('status', None)
-                return dd
+            data_dict = self.read_packet()
+            if data_dict:
+                data_dict.update({'time': datetime.datetime.now().isoformat()})
+                return data_dict
             else:
                 vprint('data values were empty')
+                return dict(zip(PMColumns, [datetime.datetime.now().isoformat(), np.nan, np.nan, np.nan, self.m.state]))
+
         except RuntimeError:
             print('break')
 
